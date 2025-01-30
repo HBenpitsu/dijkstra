@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::fmt::{self, Formatter, Display};
+use std::fmt::{self, Display, Formatter};
 
 type HeapNodeId = usize;
 
@@ -54,12 +54,19 @@ impl<K: Ord> FibonacciHeap<K> {
     /// take the ids of two heap heads and join them
     /// returns id of head of the merged heap
     fn merge(&mut self, heap1: HeapNodeId, heap2: HeapNodeId) -> HeapNodeId {
-        debug_assert!(self.is_valid_as_peek(&heap1));
-        debug_assert!(self.is_valid_as_peek(&heap2));
+        debug_assert!(self.is_valid_as_root(&heap1));
+        debug_assert!(self.is_valid_as_root(&heap2));
         // heap1 and heap2 are different
         debug_assert!(heap1 != heap2);
 
-        let (smaller, larger): (HeapNodeId, HeapNodeId) = if self.id_node_map.get(&heap1).unwrap().key < self.id_node_map.get(&heap2).unwrap().key {
+        // BOUNDARY: if both heaps are the minimum, cached one should be the parent.
+        let (smaller, larger): (HeapNodeId, HeapNodeId) = if Some(heap1) == self.min_id_cache || self
+            .id_node_map
+            .get(&heap1)
+            .unwrap()
+            .key
+            < self.id_node_map.get(&heap2).unwrap().key
+        {
             (heap1, heap2)
         } else {
             (heap2, heap1)
@@ -74,7 +81,7 @@ impl<K: Ord> FibonacciHeap<K> {
     }
     /// put the heap keeping fibonacci-heap property. also update rank_id_cache
     fn put(&mut self, heap: HeapNodeId, rank: usize) {
-        debug_assert!(self.is_valid_as_peek(&heap));
+        debug_assert!(self.is_valid_as_root(&heap));
         // given rank is consistent with the rank of the heap
         // note: although rank can be calculated by heap, it is given as an argument for efficiency
         debug_assert!(self.id_node_map.get(&heap).unwrap().rank() == rank);
@@ -104,9 +111,11 @@ impl<K: Ord> FibonacciHeap<K> {
             self.min_id_cache = Some(id);
         }
     }
-    /// debug method. returns true if the given id is valid as a peek. peek means the node that is not a child of any other node
-    fn is_valid_as_peek(&self, peek: &HeapNodeId) -> bool {
-        self.id_node_map.get(peek).is_some_and(|heap| heap.parent.is_none())
+    /// debug method. returns true if the given id is valid as a root. root means the node that is not a child of any other node
+    fn is_valid_as_root(&self, root: &HeapNodeId) -> bool {
+        self.id_node_map
+            .get(root)
+            .is_some_and(|root| root.parent.is_none())
     }
 }
 
@@ -118,10 +127,10 @@ impl<K: Ord> FibonacciHeap<K> {
         self.id_provider += 1;
         self.id_provider
     }
-    fn make_and_link_node(&mut self, id:HeapNodeId, key:K) {
+    fn make_and_link_node(&mut self, id: HeapNodeId, key: K) {
         // make brand new node with id
         let node = Node {
-            key: key,
+            key,
             parent: None,
             children: vec![],
             shrinked: false,
@@ -137,10 +146,13 @@ impl<K: Ord> FibonacciHeap<K> {
     /// only used for debugging
     fn pop_assertions(&self) -> bool {
         if let Some(min_id_cache) = self.min_id_cache {
-            assert!(self.is_valid_as_peek(&min_id_cache));
             let min_node = self.id_node_map.get(&min_id_cache).unwrap();
+            assert!(self.is_valid_as_root(&min_id_cache));
             assert!(self.rank_id_cache.get(&min_node.rank()).is_some());
-            assert!(self.rank_id_cache.get(&min_node.rank()).is_some_and(|&id| &id == &min_id_cache));
+            assert!(self
+                .rank_id_cache
+                .get(&min_node.rank())
+                .is_some_and(|&id| &id == &min_id_cache));
         }
         return true;
     }
@@ -148,15 +160,15 @@ impl<K: Ord> FibonacciHeap<K> {
         match self.min_id_cache.take() {
             Some(min_id) => {
                 let min_node = self.id_node_map.get(&min_id).unwrap();
-                self.rank_id_cache.remove(&min_node.rank());
+                let min_id_on_rank_cache = self.rank_id_cache.remove(&min_node.rank());
+                assert_eq!(min_id_on_rank_cache.unwrap(), min_id);
                 Some(min_id)
             }
             None => None,
         }
     }
-    /// cut off children from given node. returns the former children.
-    /// children are floating in the air after this method
-    fn release_children(&mut self, id: HeapNodeId) -> Vec<HeapNodeId>{
+    /// cut off children from given node.
+    fn release_children(&mut self, id: HeapNodeId) {
         let node = self.id_node_map.get_mut(&id).unwrap();
         let children = node.children.clone();
         node.children.clear();
@@ -165,7 +177,7 @@ impl<K: Ord> FibonacciHeap<K> {
             child.parent = None;
             child.shrinked = false;
         }
-        return children;
+        self.land_floating_nodes(children);
     }
     fn rebuild_min_id_cache(&mut self) {
         let mut min_id = None;
@@ -187,9 +199,8 @@ impl<K: Ord> FibonacciHeap<K> {
 /// to modify
 impl<K: Ord> FibonacciHeap<K> {
     /// detach the child from its parent, mark its parent and do cascading cut if necessary.
-    /// this method may leave some nodes floating in the air
     /// returns the floating nodes.
-    fn cut(&mut self, parent: HeapNodeId, child: HeapNodeId) -> Vec<HeapNodeId> {
+    fn cut(&mut self, parent: HeapNodeId, child: HeapNodeId) {
         // detach the child from its parent
         let child_node = self.id_node_map.get_mut(&child).unwrap();
         child_node.parent = None;
@@ -198,12 +209,12 @@ impl<K: Ord> FibonacciHeap<K> {
         let mut floating = vec![child];
 
         let parent_node = self.id_node_map.get_mut(&parent).unwrap();
+        let needs_cascading_cut = parent_node.shrinked; // before mutate parent_node, note the state
         if parent_node.parent.is_some() {
             // if the parent has a parent, the parent should be marked as shrinked to do cascading cut
             parent_node.shrinked = true;
-        }
-        else {
-            // if the parent has a parent, the parent may be on rank_id_cache.
+        } else {
+            // if the parent has no parent, the parent may be on rank_id_cache.
             // if the parent remains in rank_id_cache, it becomes inconsistent with the actual rank of the node.
             // to avoid this, remove it from rank_id_cache if any.
             let former_rank_of_parent = parent_node.rank();
@@ -217,22 +228,19 @@ impl<K: Ord> FibonacciHeap<K> {
         }
         // remove the child from the children of the parent
         parent_node.children.retain(|&id| id != child);
-        let needs_cascading_cut = parent_node.shrinked;
-        
+
         if needs_cascading_cut {
             let parent_of_parent = parent_node.parent.unwrap();
-            let newly_floating = self.cut(parent_of_parent, parent);
-            floating.extend(newly_floating.into_iter());
+            self.cut(parent_of_parent, parent);
         }
 
-        return floating;
+        self.land_floating_nodes(floating);
     }
     fn heapify_between(&mut self, parent: HeapNodeId, child: HeapNodeId) {
         let parent_node = self.id_node_map.get(&parent).unwrap();
         let child_node = self.id_node_map.get(&child).unwrap();
         if parent_node.key > child_node.key {
-            let floating = self.cut(parent, child);
-            self.land_floating_nodes(floating);
+            self.cut(parent, child);
         }
     }
 }
@@ -254,8 +262,7 @@ impl<K: Ord> MutableHeap<K> for FibonacciHeap<K> {
         }
         let min_id = min_id.unwrap();
 
-        let floating = self.release_children(min_id);
-        self.land_floating_nodes(floating);
+        self.release_children(min_id);
 
         self.rebuild_min_id_cache();
 
@@ -265,16 +272,12 @@ impl<K: Ord> MutableHeap<K> for FibonacciHeap<K> {
         };
     }
     fn get_min(&self) -> Option<HeapNodeId> {
-        if self.min_id_cache.is_none() {
-            return None;
-        }
-        let min_id = self.min_id_cache.unwrap();
-        return Some(min_id);
+        return self.min_id_cache;
     }
     fn modify(&mut self, id: HeapNodeId, new_key: K) {
         // if client not tracks the id properly, they may try to modify a non-existing node
         assert!(self.id_node_map.contains_key(&id));
-        
+
         let node = self.id_node_map.get_mut(&id).unwrap();
         node.key = new_key;
         self.update_min_id_cache(id);
@@ -305,7 +308,7 @@ impl<K: Display> Display for Node<K> {
     }
 }
 
-impl<K: Display+Ord> FibonacciHeap<K> {
+impl<K: Display + Ord> FibonacciHeap<K> {
     fn display_tree(&self, id: HeapNodeId, depth: usize, f: &mut Formatter) -> fmt::Result {
         let node = self.id_node_map.get(&id).unwrap();
         for _ in 0..depth {
@@ -319,7 +322,7 @@ impl<K: Display+Ord> FibonacciHeap<K> {
     }
 }
 
-impl<K: Display+Ord> Display for FibonacciHeap<K> {
+impl<K: Display + Ord> Display for FibonacciHeap<K> {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         for (_, id) in self.rank_id_cache.iter() {
             self.display_tree(id.clone(), 0, f)?;
@@ -356,7 +359,7 @@ mod test {
         println!("{}\npushed\n", heap);
         heap.push(4);
         println!("{}\npushed\n", heap);
-        heap.push(10);
+        let ten = heap.push(10);
         println!("{}\npushed\n", heap);
         heap.push(11);
         println!("{}\npushed\n", heap);
@@ -368,15 +371,17 @@ mod test {
 
         let (id, key) = heap.pop().unwrap();
         println!("{}", heap);
-        println!("popped (id: {}, key: {})\n",id,key);
+        println!("popped (id: {}, key: {})\n", id, key);
         assert_eq!(id, five);
         assert_eq!(key, -1);
         let (id, key) = heap.pop().unwrap();
         println!("{}", heap);
-        println!("popped (id: {}, key: {})\n",id,key);
+        println!("popped (id: {}, key: {})\n", id, key);
         assert_eq!(key, 1);
 
         heap.modify(thirty_four, -1);
+        println!("{}\nmodified\n", heap);
+        heap.modify(ten, -1);
         println!("{}\nmodified\n", heap);
         heap.modify(eight, 50);
         println!("{}\nmodified\n", heap);
@@ -385,7 +390,7 @@ mod test {
         while let Some((id, key)) = heap.pop() {
             println!("{}", heap);
             assert!(previous_key <= key);
-            println!("popped (id: {}, key: {})\n",id,key);
+            println!("popped (id: {}, key: {})\n", id, key);
             previous_key = key;
         }
     }
